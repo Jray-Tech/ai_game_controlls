@@ -1,5 +1,6 @@
 Goal 
 valuate the number of punches made in a video 
 1. How do u identify a punch 
-2. Make it count only one punch. 
-3. 
+2. Make it count only one punch. Maybe use a timed delay 
+3. Have a neurtral state or use finante state machin so if nmot identifyong any action it can wait 
+4. Have high confidence that said action occurs. 

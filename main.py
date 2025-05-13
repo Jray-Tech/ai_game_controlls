@@ -1,47 +1,69 @@
 import cv2
 import mediapipe as mp
 import numpy as np
-
+from scipy.stats import linregress
+from collections import deque
 
 
 
 video = cv2.VideoCapture(1)
-
 mp_drawing = mp.solutions.drawing_utils
 mp_pose = mp.solutions.pose
 
 
-# Refactoring will mak this a finite state machine
-# Define a function to detect actions based on landmarks
-def detect_actions(landmarks):
-    actions = []
-    
-    left_wrist = landmarks[mp_pose.PoseLandmark.LEFT_WRIST.value]
-    right_wrist = landmarks[mp_pose.PoseLandmark.RIGHT_WRIST.value]
-    left_shoulder = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value]
-    right_shoulder = landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value]
-    left_elbow = landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value]
-    right_elbow = landmarks[mp_pose.PoseLandmark.RIGHT_ELBOW.value]
-    
+
+possible_actions = {
+    "PUNCH_RIGHT": 0,
+    "PUNCH_LEFT": 1,
+}
+
+frames_per_action = 5
+# Distance history buffers for each hand
+hand_histories = {
+    "RIGHT": deque(maxlen=frames_per_action),
+    "LEFT": deque(maxlen=frames_per_action)
+}
 
 
-    if right_wrist.y > right_shoulder.y:
-        print("Punch Right")
-        actions.append("PUNCH_RIGHT")
-    if left_wrist.y > left_shoulder.y:
-        print("Punch Left")
-        actions.append("PUNCH_LEFT")
+def detect_punch(landmarks, hand_side):
+    """
+    Detects punch motion for LEFT or RIGHT hand using distance change over time.
+    Args:
+        landmarks: pose landmarks from mediapipe
+        hand_side: "RIGHT" or "LEFT"
+    """
+    wrist_idx = getattr(mp_pose.PoseLandmark, f"{hand_side}_WRIST").value
+    shoulder_idx = getattr(mp_pose.PoseLandmark, f"{hand_side}_SHOULDER").value
 
-    return actions
+    wrist = landmarks[wrist_idx]
+    shoulder = landmarks[shoulder_idx]
+
+    distance = np.linalg.norm(
+        np.array([wrist.x, wrist.y, wrist.z]) -
+        np.array([shoulder.x, shoulder.y, shoulder.z])
+    )
+
+    # Automatically removes oldest if > maxlen
+    hand_histories[hand_side].append(distance)
+
+    # Detect punch when buffer is full
+    if len(hand_histories[hand_side]) == frames_per_action:
+        x = list(range(frames_per_action))
+        y = list(hand_histories[hand_side])
+        slope, _, _, _, _ = linregress(x, y)
+        print(f"Slope for {hand_side}: {slope}")
+
+        if slope > 0.08:
+            print(f"💥 PUNCH {hand_side} detected!")
+            return possible_actions[f"PUNCH_{hand_side}"]
+
+
+
 
 
 
 #  Get pose estimation model.
 with mp_pose.Pose(
-    # static_image_mode=False,
-    # model_complexity=2,
-    # enable_segmentation=True,
-    # smooth_landmarks=True,
     min_detection_confidence=0.7,
     min_tracking_confidence=0.7) as pose:
 
@@ -66,9 +88,8 @@ with mp_pose.Pose(
         # Extract landmarks.
         try:
             landmarks = results.pose_landmarks.landmark
-            detect_actions(landmarks)
-            # print(landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER])
-            # print(landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER].visibility)
+            detect_punch(landmarks, "RIGHT")
+            detect_punch(landmarks, "LEFT")
         except:
             pass
 
