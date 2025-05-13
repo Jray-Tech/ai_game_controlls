@@ -1,0 +1,5 @@
+Goal 
+valuate the number of punches made in a video 
+1. How do u identify a punch 
+2. Make it count only one punch. 
+3. 
