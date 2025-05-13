@@ -5,8 +5,10 @@ from scipy.stats import linregress
 from collections import deque
 import time
 from pynput.keyboard import Controller
+from pynput.keyboard import Key
 
 
+# Initialize video capture and Mediapipe
 video = cv2.VideoCapture(1)
 mp_drawing = mp.solutions.drawing_utils
 mp_pose = mp.solutions.pose
@@ -18,16 +20,32 @@ possible_actions = {
     "LEAN_BACK": 3,
 }
 
-# Map each action ID to a keyboard key
-ACTION_KEY_MAP = {
-    possible_actions["PUNCH_RIGHT"]: "R",  
-    possible_actions["PUNCH_LEFT"]: "T",   
-    possible_actions["LEAN_FWD"]: "A",     
-    possible_actions["LEAN_BACK"]: "D",    
-}
 
-frames_per_action = 5         
+ACTION_KEY_MAP = {
+    possible_actions["PUNCH_RIGHT"]: Key.space,   # jump
+    possible_actions["PUNCH_LEFT"]: Key.space,   # jump
+    # possible_actions["LEAN_BACK"]:  Key.space,   # duck 
+}
+# Map each action ID to a keyboard key
+# ACTION_KEY_MAP = {
+#     possible_actions["PUNCH_RIGHT"]: "R",  
+#     possible_actions["PUNCH_LEFT"]: "T",   
+#     possible_actions["LEAN_FWD"]: "A",     
+#     possible_actions["LEAN_BACK"]: "D",    
+# }
+
+frames_per_action = 7         
 COOLDOWN = 0.5                
+SLOPE_THRESH = 0.02  
+VIS_THRESH  = 0.6   # ignore fuzzy frames
+CALIBRATION_FRAMES = 20 # number of frames to calibrate lean
+LEAN_FWD_THR  = -0.06   
+LEAN_BACK_THR =  0.06  # more positive  → farther from camera
+RECENTER_RATE = 0.003  # rate of recentering
+
+calib_depths = deque(maxlen=CALIBRATION_FRAMES)
+neutral_depth = None  # will hold the mid‑point once locked in
+
 
 
 hand_histories = {side: deque(maxlen=frames_per_action) for side in ["RIGHT", "LEFT"]}
@@ -48,19 +66,21 @@ def trigger_key(action_id: int):
         print(f"[KEY] Sent '{key}' for action {action_id}")
 
 
-def detect_lean(landmarks):
+def detect_lean(landmarks, neutral_depth: float):
+    """Return LEAN_FWD / LEAN_BACK or None, based on difference from neutral."""
     nose = landmarks[mp_pose.PoseLandmark.NOSE.value]
-    metric = nose.z  # z‑value is depth relative to the camera
-    lean_hist.append(metric)
+    if nose.visibility < VIS_THRESH or neutral_depth is None:
+        return None
 
-    if len(lean_hist) == frames_per_action:
-        x = range(frames_per_action)
-        slope, *_ = linregress(x, lean_hist)
-        if slope < -0.05:
-            return possible_actions["LEAN_FWD"]
-        elif slope > 0.05:
-            return possible_actions["LEAN_BACK"]
+    diff = nose.z - neutral_depth 
+    neutral_depth += RECENTER_RATE * diff
+
+    if diff < LEAN_FWD_THR:
+        return possible_actions["LEAN_FWD"]
+    elif diff > LEAN_BACK_THR:
+        return possible_actions["LEAN_BACK"]
     return None
+
 
 
 def detect_punch(landmarks, hand_side: str):
@@ -70,22 +90,33 @@ def detect_punch(landmarks, hand_side: str):
     wrist = landmarks[wrist_idx]
     shoulder = landmarks[shoulder_idx]
 
-    distance = np.linalg.norm(
-        np.array([wrist.x, wrist.y, wrist.z]) -
-        np.array([shoulder.x, shoulder.y, shoulder.z])
-    )
+    # bail out if Mediapipe thinks the landmark is unreliable
+    if wrist.visibility   < VIS_THRESH or shoulder.visibility < VIS_THRESH:
+        return None
 
-    hand_histories[hand_side].append(distance)
 
-    if len(hand_histories[hand_side]) == frames_per_action:
-        x = range(frames_per_action)
-        slope, *_ = linregress(x, hand_histories[hand_side])
-        if slope > 0.08:
-            return possible_actions[f"PUNCH_{hand_side}"]
+    dist = np.hypot(wrist.x - shoulder.x, wrist.y - shoulder.y)
+
+    hand_histories[hand_side].append(dist)
+
+    # not enough history yet
+    if len(hand_histories[hand_side]) < frames_per_action:
+        return None
+
+    smoothed = np.median(hand_histories[hand_side])
+
+    # linear trend on the smoothed series
+    x = np.arange(frames_per_action)
+    slope, *_ = linregress(x, list(hand_histories[hand_side]))
+    # print(f"[DEBUG] {hand_side} slope: {slope:.3f}, smoothed: {smoothed:.3f}")
+
+    if slope > SLOPE_THRESH and smoothed > 0.1: 
+        return possible_actions[f"PUNCH_{hand_side}"]
     return None
 
-with mp_pose.Pose(min_detection_confidence=0.7,
-                  min_tracking_confidence=0.7) as pose:
+
+with mp_pose.Pose(min_detection_confidence=0.5,
+                  min_tracking_confidence=0.5) as pose:
     while video.isOpened():
         ret, frame = video.read()
         if not ret:
@@ -101,11 +132,22 @@ with mp_pose.Pose(min_detection_confidence=0.7,
         try:
             landmarks = results.pose_landmarks.landmark
 
+            nose = landmarks[mp_pose.PoseLandmark.NOSE.value]
+            if neutral_depth is None:
+                if nose.visibility > VIS_THRESH:
+                    calib_depths.append(nose.z)
+                if len(calib_depths) == CALIBRATION_FRAMES:
+                    neutral_depth = float(np.median(calib_depths))
+                    print(f"[INFO] Neutral depth locked at {neutral_depth:.3f}")
+                # Skip action detection until we have a midpoint
+                continue
+
+
             # Detect actions
             actions = [
                 detect_punch(landmarks, "RIGHT"),
                 detect_punch(landmarks, "LEFT"),
-                detect_lean(landmarks),
+                detect_lean(landmarks, neutral_depth),
             ]
 
             # Send key for each detected action
